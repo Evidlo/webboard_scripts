@@ -14,6 +14,7 @@ webboard_url = 'web-board.asp'
 login_url = 'https://courses.engr.illinois.edu/ece445/login.asp'
 cache_file = 'cache.json'
 
+# login and return a session object
 def login(username, password):
     payload = {
         'username': username,
@@ -28,6 +29,7 @@ def login(username, password):
 
 
 
+# get dictionary of topics (no posts data)
 def get_current_topics():
     result = s.get(urljoin(base_url, webboard_url))
 
@@ -50,12 +52,14 @@ def get_current_topics():
     return topics
 
 
+# get dictionary of topics (with posts data) stored on disk
 def get_cached_topics():
     if os.path.exists(cache_file):
         with open(cache_file, 'rb') as f:
             return pickle.load(f)
 
 
+# compare new and cache topics to decide what topic posts to redownload
 def update_topics(current_topics, cached_topics):
 
     new_changed_topic_ids = []
