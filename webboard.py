@@ -1,34 +1,50 @@
-from pony.orm import Database, Required, Set, db_session, select, delete, Optional, PrimaryKey
-from webboard import *
+#!/bin/env python3
+# Evan Widloski - 2018-09-01
+# Script for parsing Web Board
+
+from pony.orm import (
+    Database, Required, Set,
+    db_session, select, delete,
+    Optional, PrimaryKey, desc, count
+)
+import creds
+import regex
+import argparse
+from IPython import embed
+from datetime import datetime
 
 import requests
 from urllib.parse import urljoin
 from lxml.html.soupparser import fromstring
-from creds import username, password
+import os
+import shutil
+
 
 base_url = 'https://courses.engr.illinois.edu/ece445/pace/'
 webboard_url = 'web-board.asp'
 login_url = 'https://courses.engr.illinois.edu/ece445/login.asp'
+database='cache.sqlite'
 
 db = Database()
-db.bind(provider='sqlite', filename='cache.sqlite3', create_db=True)
+db.bind(provider='sqlite', filename=database, create_db=True)
 
 class User(db.Entity):
     def __repr__(self):
-        return 'User: ' + self.name
+        return 'User: ' + self.name + ' ({})'.format(self.user_type) if self.user_type else None
 
     name = Required(str)
+    user_type = Optional(str)
     posts = Set('Post')
     topics = Set('Topic')
 
 
 class Topic(db.Entity):
     def __repr__(self):
-        return 'Topic:' + self.title
+        return 'Topic: ' + self.title
 
     author = Required(User)
-    date_created = Required(str)
-    date_last_reply = Optional(str, nullable=True)
+    date_created_str = Required(str)
+    date_last_reply_str = Optional(str, nullable=True)
     posts = Set('Post')
     topic_type = Optional(str, nullable=True)
     title = Required(str)
@@ -37,12 +53,14 @@ class Topic(db.Entity):
 
 class Post(db.Entity):
     def __repr__(self):
-        return 'Post: ' + self.author
+        return 'Post: ' + self.content[:20]
 
     author = Required(User)
     topic = Required(Topic)
-    date = Required(str)
+    date = Required(datetime)
     content = Required(str)
+    read = Required(bool)
+    post_id = Required(str)
 
 db.generate_mapping(create_tables=True)
 
@@ -65,7 +83,7 @@ def login(username, password):
 def add_update_topic(s, topic_element):
     author = topic_element.find('td[2]/nobr').text.lstrip('by ')
     topic_id = topic_element.find('td[2]/a').attrib['href'].lstrip('view-topic.asp?id=')
-    date_last_reply = topic_element.find('td[6]').text
+    date_last_reply_str = topic_element.find('td[6]').text
 
     topic = Topic.get(topic_id=topic_id)
     if topic is None:
@@ -79,14 +97,12 @@ def add_update_topic(s, topic_element):
             url=topic_element.find('td[2]/a').attrib['href'],
             title = topic_element.find('td[2]/a').text,
             topic_type=topic_element.find('td[3]').text,
-            date_created=topic_element.find('td[5]').text,
-            date_last_reply=date_last_reply
+            date_created_str=topic_element.find('td[5]').text,
+            date_last_reply_str=date_last_reply_str
         )
 
-    elif date_last_reply != topic.date_last_reply:
-        topic.date_last_reply = date_last_reply
-
-        topic.posts.clear()
+    elif date_last_reply_str != topic.date_last_reply_str:
+        topic.date_last_reply_str = date_last_reply_str
     else:
         return
 
@@ -96,31 +112,120 @@ def add_update_topic(s, topic_element):
     tree = fromstring(result.content)
 
     for post_element in tree.xpath('.//div[@id="post_container"]/div[@class="item"]'):
-        author = post_element.find('div[@class="header"]/div[@class="author"]').text
-        import ipdb
-        ipdb.set_trace()
-        author = author.rstrip(' (ta)').rstrip(' (student)').rstrip(' (prof)')
+        post_id = regex.match(
+            '.*post: \'([0-9]+)\'.*',
+            post_element.find('div/a').attrib['onclick']
+        ).groups()[0]
+        if not post_id in [p.post_id for p in topic.posts]:
+            author = post_element.find('div[@class="header"]/div[@class="author"]').text
+            try:
+                user_type = regex.match('.+ \((.+)\)', author).groups()[0]
+                author = regex.sub(' \((.+)\)', '', author)
+            except Exception as e:
+                raise Exception(f'Could not parse author: {author}')
 
-        if not User.get(name=author):
-            User(name=author)
 
-        Post(
-            author=User.get(name=author),
-            date=post_element.find('div[@class="header"]/div[@class="date"]').text,
-            content=post_element.find('div[@class="post_content"]/p').text,
-            topic=topic
+            # if user doesn't already exist, create it
+            if not User.get(name=author):
+                User(name=author, user_type=user_type)
+            else:
+                User.get(name=author).user_type = user_type
+
+            date = post_element.find('div[@class="header"]/div[@class="date"]').text
+            date = datetime.strptime(date, '%m/%d/%Y %H:%M:%S %p')
+            Post(
+                author=User.get(name=author),
+                date=date,
+                content=post_element.find('div[@class="post_content"]/p').text,
+                topic=topic,
+                read=False,
+                post_id=post_id
         )
 
 
-# get dictionary of topics (no posts data)
-def update():
-    s = login(username, password)
+@db_session
+def update(args):
+    s = login(creds.username, creds.password)
     result = s.get(urljoin(base_url, webboard_url))
     tree = fromstring(result.content)
+    # set all posts as 'read'
+    all_posts = Post.select()
+    for p in all_posts:
+        p.read = True
+
     for topic_element in tree.xpath('.//table/tbody/tr'):
         add_update_topic(s, topic_element)
 
+@db_session
+def replies(args):
+    """Check for new posts in topics you have posted in"""
+
+    # topics which you have posted in
+    my_topics = Topic.select(lambda t: creds.name in (p.author.name for p in t.posts))
+    new_topics = my_topics.filter(lambda t: False in (p.read for p in t.posts))
+    if len(new_topics) == 0:
+        print("No new posts in your conversations")
+    else:
+        for t in new_topics:
+            print("{} new posts in topic \"{}\"".format(len(t.posts), t.title))
+
+
+def clean(args):
+    """Delete the database"""
+    os.remove(database)
+
+def shell(args):
+    """Enter ipython shell after opening database"""
+    db_session()._enter()
+    embed()
+
+@db_session
+def ta_posts(args):
+    """Show number of posts for each TA"""
+    tas = User.select(
+        lambda u: u.user_type == 'ta'
+    ).order_by(lambda u: desc(count(u.posts)))
+    for ta in tas:
+        print(str(len(ta.posts)).ljust(3), ta.name)
+
+
+@db_session
+def student_posts(args):
+    """Show number of posts for each student"""
+    students = User.select(
+        lambda u: u.user_type == 'student'
+    ).order_by(lambda u: desc(count(u.posts)))
+    for student in students:
+        print(str(len(student.posts)).ljust(3), student.name)
+
 
 if __name__ == '__main__':
-    print('checking for updates')
-    update()
+
+    parser = argparse.ArgumentParser(description="Append -h to any command to view its syntax.")
+    parser._positionals.title = "commands"
+
+    subparsers = parser.add_subparsers()
+    subparsers.dest = 'command'
+    subparsers.required = True
+
+    update_parser = subparsers.add_parser('update', help="update database with new posts/topics")
+    update_parser.set_defaults(func=update)
+
+    clean_parser = subparsers.add_parser('clean', help="clear the database")
+    clean_parser.set_defaults(func=clean)
+
+    shell_parser = subparsers.add_parser('shell', help="shell for interacting with database")
+    shell_parser.set_defaults(func=shell)
+
+    replies_parser = subparsers.add_parser('replies', help="print new replies since last update")
+    replies_parser.set_defaults(func=replies)
+
+    ta_posts_parser = subparsers.add_parser('ta_posts', help="print TA post count")
+    ta_posts_parser.set_defaults(func=ta_posts)
+
+    student_posts_parser = subparsers.add_parser('student_posts', help="print STUDENT post count")
+    student_posts_parser.set_defaults(func=student_posts)
+
+    args = parser.parse_args()
+
+    args.func(args)
