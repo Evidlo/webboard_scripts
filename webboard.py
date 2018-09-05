@@ -171,14 +171,15 @@ def replies(args):
     else:
         for t in new_topics:
             new_posts = t.posts.select(lambda p: not p.read).order_by(desc(Post.date))
-            print("{} new posts in topic \"{}\"".format(len(new_posts), t.title))
+            print("{} new posts in topic \"{}\"\n".format(len(new_posts), t.title))
             for post in new_posts:
                 print(
-                    post.author.name[:18].rjust(20) +
+                    "    " + post.author.name[:18].ljust(20) +
                     ": " +
                     post.content[:40] +
-                    "..." if len(post.content) > 40 else ""
+                    ("..." if len(post.content) > 40 else "")
                 )
+            print("")
 
 
 def clean(args):
