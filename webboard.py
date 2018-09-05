@@ -18,7 +18,7 @@ from urllib.parse import urljoin
 from lxml.html.soupparser import fromstring
 import os
 import shutil
-
+import textwrap
 
 base_url = 'https://courses.engr.illinois.edu/ece445/pace/'
 webboard_url = 'web-board.asp'
@@ -53,7 +53,7 @@ class Topic(db.Entity):
 
 class Post(db.Entity):
     def __repr__(self):
-        return 'Post: ' + self.content[:20]
+        return 'Post: ' + self.content[:20] + '...' if len(self.content) > 20 else ''
 
     author = Required(User)
     topic = Required(Topic)
@@ -65,8 +65,8 @@ class Post(db.Entity):
 db.generate_mapping(create_tables=True)
 
 
-# login and return a session object
 def login(username, password):
+    """Login and return a session object"""
     payload = {
         'username': username,
         'password': password,
@@ -81,6 +81,7 @@ def login(username, password):
 
 @db_session
 def add_update_topic(s, topic_element):
+    """Update a specific topic from an lxml element"""
     author = topic_element.find('td[2]/nobr').text.lstrip('by ')
     topic_id = topic_element.find('td[2]/a').attrib['href'].lstrip('view-topic.asp?id=')
     date_last_reply_str = topic_element.find('td[6]').text
@@ -119,10 +120,10 @@ def add_update_topic(s, topic_element):
         if not post_id in [p.post_id for p in topic.posts]:
             author = post_element.find('div[@class="header"]/div[@class="author"]').text
             try:
-                user_type = regex.match('.+ \((.+)\)', author).groups()[0]
-                author = regex.sub(' \((.+)\)', '', author)
+                user_type = regex.match('.+ \((.*)\)', author).groups()[0]
+                author = regex.sub(' \((.*)\)', '', author)
             except Exception as e:
-                raise Exception(f'Could not parse author: {author}')
+                raise Exception('Could not parse author: {}'.format(author)) from e
 
 
             # if user doesn't already exist, create it
@@ -145,6 +146,8 @@ def add_update_topic(s, topic_element):
 
 @db_session
 def update(args):
+    """Update the database"""
+
     s = login(creds.username, creds.password)
     result = s.get(urljoin(base_url, webboard_url))
     tree = fromstring(result.content)
@@ -164,39 +167,62 @@ def replies(args):
     my_topics = Topic.select(lambda t: creds.name in (p.author.name for p in t.posts))
     new_topics = my_topics.filter(lambda t: False in (p.read for p in t.posts))
     if len(new_topics) == 0:
-        print("No new posts in your conversations")
+        print("No new posts in your conversations since last update")
     else:
         for t in new_topics:
-            print("{} new posts in topic \"{}\"".format(len(t.posts), t.title))
+            new_posts = t.posts.select(lambda p: not p.read).order_by(desc(Post.date))
+            print("{} new posts in topic \"{}\"".format(len(new_posts), t.title))
+            for post in new_posts:
+                print(
+                    post.author.name[:18].rjust(20) +
+                    ": " +
+                    post.content[:40] +
+                    "..." if len(post.content) > 40 else ""
+                )
 
 
 def clean(args):
     """Delete the database"""
+
     os.remove(database)
 
 def shell(args):
     """Enter ipython shell after opening database"""
+
     db_session()._enter()
     embed()
 
 @db_session
 def ta_posts(args):
     """Show number of posts for each TA"""
+
     tas = User.select(
         lambda u: u.user_type == 'ta'
     ).order_by(lambda u: desc(count(u.posts)))
     for ta in tas:
-        print(str(len(ta.posts)).ljust(3), ta.name)
+        print(str(len(ta.posts)).ljust(4), ta.name)
 
 
 @db_session
 def student_posts(args):
     """Show number of posts for each student"""
+
     students = User.select(
         lambda u: u.user_type == 'student'
     ).order_by(lambda u: desc(count(u.posts)))
     for student in students:
-        print(str(len(student.posts)).ljust(3), student.name)
+        print(str(len(student.posts)).ljust(4), student.name)
+
+@db_session
+def posts(args):
+    """Show all posts from a particular user"""
+
+    topics = Topic.select(lambda t: args.name in (p.author.name for p in t.posts))
+    for topic in topics:
+        posts = topic.posts.select(lambda p: args.name == p.author.name)
+        print("{} posts in topic \"{}\"".format(posts.count(), topic.title), "\n")
+        for post in posts:
+            print(textwrap.indent(textwrap.fill('> ' + post.content), '    '), "\n")
 
 
 if __name__ == '__main__':
@@ -223,8 +249,12 @@ if __name__ == '__main__':
     ta_posts_parser = subparsers.add_parser('ta_posts', help="print TA post count")
     ta_posts_parser.set_defaults(func=ta_posts)
 
-    student_posts_parser = subparsers.add_parser('student_posts', help="print STUDENT post count")
+    student_posts_parser = subparsers.add_parser('student_posts', help="print student post count")
     student_posts_parser.set_defaults(func=student_posts)
+
+    posts_parser = subparsers.add_parser('posts', help="print all posts by user")
+    posts_parser.add_argument('name', metavar='name', type=str, help="Full name of user")
+    posts_parser.set_defaults(func=posts)
 
     args = parser.parse_args()
 
