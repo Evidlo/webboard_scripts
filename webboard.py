@@ -3,9 +3,7 @@
 # Script for parsing Web Board
 
 from pony.orm import (
-    Database, Required, Set,
-    db_session, select, delete,
-    Optional, PrimaryKey, desc, count
+    Database, Required, Set, db_session, Optional, desc, count
 )
 import creds
 import regex

@@ -2,7 +2,7 @@
 
 ### Setup
 
-    pip install -r requirements.txt
+    pip3 install --user -r requirements.txt
     cp creds.py.example creds.py
     
 Update `creds.py` with your credentials
