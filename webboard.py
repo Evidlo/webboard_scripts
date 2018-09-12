@@ -21,6 +21,7 @@ import textwrap
 base_url = 'https://courses.engr.illinois.edu/ece445/pace/'
 webboard_url = 'web-board.asp'
 login_url = 'https://courses.engr.illinois.edu/ece445/login.asp'
+logout_url = 'https://courses.engr.illinois.edu/ece445/logoutjasp'
 database='cache.sqlite'
 
 db = Database()
@@ -28,7 +29,7 @@ db.bind(provider='sqlite', filename=database, create_db=True)
 
 class User(db.Entity):
     def __repr__(self):
-        return 'User: ' + self.name + ' ({})'.format(self.user_type) if self.user_type else None
+        return 'User: ' + self.name + (' ({})'.format(self.user_type) if self.user_type else '')
 
     name = Required(str)
     user_type = Optional(str)
@@ -41,8 +42,8 @@ class Topic(db.Entity):
         return 'Topic: ' + self.title
 
     author = Required(User)
-    date_created_str = Required(str)
-    date_last_reply_str = Optional(str, nullable=True)
+    date_created = Required(datetime)
+    date_last_reply = Optional(datetime, nullable=True)
     posts = Set('Post')
     topic_type = Optional(str, nullable=True)
     title = Required(str)
@@ -51,16 +52,19 @@ class Topic(db.Entity):
 
 class Post(db.Entity):
     def __repr__(self):
-        return 'Post: ' + self.content[:20] + '...' if len(self.content) > 20 else ''
+        return 'Post: ' + self.content[:20] + ('...' if len(self.content) > 20 else '')
 
     author = Required(User)
     topic = Required(Topic)
     date = Required(datetime)
-    content = Required(str)
+    content = Optional(str, nullable=True)
     read = Required(bool)
     post_id = Required(str)
 
-db.generate_mapping(create_tables=True)
+try:
+    db.generate_mapping(create_tables=True)
+except Exception as e:
+    raise Exception("There is a problem with your database.  Try the `clean` command") from e
 
 
 def login(username, password):
@@ -76,13 +80,16 @@ def login(username, password):
     assert b'Your username and password were incorrect' not in result.content, "Incorrect user/pass"
     return s
 
-
 @db_session
 def add_update_topic(s, topic_element):
     """Update a specific topic from an lxml element"""
     author = topic_element.find('td[2]/nobr').text.lstrip('by ')
     topic_id = topic_element.find('td[2]/a').attrib['href'].lstrip('view-topic.asp?id=')
+
     date_last_reply_str = topic_element.find('td[6]').text
+    date_last_reply = None
+    if date_last_reply_str is not None:
+        date_last_reply = datetime.strptime(date_last_reply_str + 'm', '%m/%d %H:%M%p')
 
     topic = Topic.get(topic_id=topic_id)
     if topic is None:
@@ -90,25 +97,28 @@ def add_update_topic(s, topic_element):
         if not User.get(name=author):
             User(name=author)
 
+        date_created = datetime.strptime(topic_element.find('td[5]').text + 'm', '%m/%d %H:%M%p')
         topic = Topic(
             author=User.get(name=author),
             topic_id=topic_id,
             url=topic_element.find('td[2]/a').attrib['href'],
             title = topic_element.find('td[2]/a').text,
             topic_type=topic_element.find('td[3]').text,
-            date_created_str=topic_element.find('td[5]').text,
-            date_last_reply_str=date_last_reply_str
+            date_last_reply=date_last_reply,
+            date_created=date_created
         )
 
-    elif date_last_reply_str != topic.date_last_reply_str:
-        topic.date_last_reply_str = date_last_reply_str
+    elif date_last_reply != topic.date_last_reply:
+        topic.date_last_reply = date_last_reply
     else:
         return
 
-    print('downloading topic {}'.format(topic.topic_id))
+    print('downloading topic {} - {}'.format(topic.topic_id, topic.title))
 
     result = s.get(urljoin(base_url, topic.url))
     tree = fromstring(result.content)
+    with open('/tmp/dump', 'wb') as f:
+        f.write(result.content)
 
     for post_element in tree.xpath('.//div[@id="post_container"]/div[@class="item"]'):
         post_id = regex.match(
@@ -135,11 +145,11 @@ def add_update_topic(s, topic_element):
             Post(
                 author=User.get(name=author),
                 date=date,
-                content=post_element.find('div[@class="post_content"]/p').text,
+                content=''.join(post_element.find('div[@class="post_content"]').itertext()),
                 topic=topic,
                 read=False,
                 post_id=post_id
-        )
+            )
 
 
 @db_session
@@ -168,7 +178,7 @@ def replies(args):
         print("No new posts in your conversations since last update")
     else:
         for t in new_topics:
-            new_posts = t.posts.select(lambda p: not p.read).order_by(desc(Post.date))
+            new_posts = t.posts.select(lambda p: not p.read).order_by(Post.date)
             print("{} new posts in topic \"{}\"\n".format(len(new_posts), t.title))
             for post in new_posts:
                 print(
@@ -213,15 +223,27 @@ def student_posts(args):
         print(str(len(student.posts)).ljust(4), student.name)
 
 @db_session
+def post_search(args):
+    posts = Post.select(lambda p: args.string.lower() in p.content.lower())
+    for post in posts:
+        print(textwrap.indent(textwrap.fill('> ' + post.content), '    '), "\n")
+
+@db_session
 def posts(args):
     """Show all posts from a particular user"""
 
-    topics = Topic.select(lambda t: args.name in (p.author.name for p in t.posts))
-    for topic in topics:
-        posts = topic.posts.select(lambda p: args.name == p.author.name)
-        print("{} posts in topic \"{}\"".format(posts.count(), topic.title), "\n")
-        for post in posts:
-            print(textwrap.indent(textwrap.fill('> ' + post.content), '    '), "\n")
+    if User.select(lambda u: u.name == args.name).count() > 0:
+        pass
+
+        topics = Topic.select(lambda t: args.name in (p.author.name for p in t.posts))
+        for topic in topics:
+            posts = topic.posts.select(lambda p: args.name == p.author.name)
+            print("{} posts in topic \"{}\"".format(posts.count(), topic.title), "\n")
+            for post in posts:
+                print(textwrap.indent(textwrap.fill('> ' + post.content), '    '), "\n")
+    else:
+        print("No posts found by user {}".format(args.name))
+
 
 
 if __name__ == '__main__':
@@ -254,6 +276,10 @@ if __name__ == '__main__':
     posts_parser = subparsers.add_parser('posts', help="print all posts by user")
     posts_parser.add_argument('name', metavar='name', type=str, help="Full name of user")
     posts_parser.set_defaults(func=posts)
+
+    post_search_parser = subparsers.add_parser('post_search', help="print all posts containing string")
+    post_search_parser.add_argument('string', metavar='string', type=str, help="case insensitive string to search for")
+    post_search_parser.set_defaults(func=post_search)
 
     args = parser.parse_args()
 
