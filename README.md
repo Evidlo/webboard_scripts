@@ -43,6 +43,14 @@ See all posts by a particular user
 
         > Both the esp8266 and esp32 are capable of acting as both a client
         and AP (access point). 
+        
+Open database in shell to run custom PonyORM queries
+
+    python3 webboard.py shell
+    
+    In[1]: list(User.select(lambda u: u.name == 'Evan Widloski').first().posts.order_by(Post.date))[0].date
+    Out[1]: datetime.datetime(2018, 8, 27, 9, 13, 34)
+
     
 See list of all commands
 
