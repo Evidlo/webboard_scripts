@@ -4,3 +4,6 @@ requests
 regex
 lxml
 bs4
+unidecode
+matplotlib
+numpy

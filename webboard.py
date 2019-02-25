@@ -10,6 +10,7 @@ import regex
 import argparse
 from IPython import embed
 from datetime import datetime
+from unidecode import unidecode
 
 import requests
 from urllib.parse import urljoin
@@ -116,23 +117,33 @@ def add_update_topic(s, topic_element):
     print('downloading topic {} - {}'.format(topic.topic_id, topic.title))
 
     result = s.get(urljoin(base_url, topic.url))
-    tree = fromstring(result.content)
+    try:
+        tree = fromstring(unidecode(result.content.decode('utf8')))
+    except:
+        print('failed to parse topic - {}'.format(topic.topic_id))
+        return
     with open('/tmp/dump', 'wb') as f:
         f.write(result.content)
 
     for post_element in tree.xpath('.//div[@id="post_container"]/div[@class="item"]'):
-        post_id = regex.match(
-            '.*post: \'([0-9]+)\'.*',
-            post_element.find('div/a').attrib['onclick']
-        ).groups()[0]
+        # post_id = regex.match(
+        #     '.*post: \'([0-9]+)\'.*',
+        #     post_element.find('div/a').attrib['onclick']
+        # ).groups()[0]
+
+        # post_id got deleted with latest update, use author name and date as id instead
+        date = post_element.find('div[@class="header"]/div[@class="date"]').text
+        date = datetime.strptime(date, '%m/%d/%Y %H:%M:%S %p')
+        author = post_element.find('div[@class="header"]/div[@class="author"]').text
+        post_id = '{}{}'.format(date, author)
+
+        # add new posts to db
         if not post_id in [p.post_id for p in topic.posts]:
-            author = post_element.find('div[@class="header"]/div[@class="author"]').text
             try:
                 user_type = regex.match('.+ \((.*)\)', author).groups()[0]
                 author = regex.sub(' \((.*)\)', '', author)
             except Exception as e:
                 raise Exception('Could not parse author: {}'.format(author)) from e
-
 
             # if user doesn't already exist, create it
             if not User.get(name=author):
@@ -140,8 +151,6 @@ def add_update_topic(s, topic_element):
             else:
                 User.get(name=author).user_type = user_type
 
-            date = post_element.find('div[@class="header"]/div[@class="date"]').text
-            date = datetime.strptime(date, '%m/%d/%Y %H:%M:%S %p')
             Post(
                 author=User.get(name=author),
                 date=date,
